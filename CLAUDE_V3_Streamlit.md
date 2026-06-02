@@ -243,7 +243,7 @@
 
 # | 4-Way Air Swing | int64 | Check correlation before deciding |
 
-# 
+# Add model_year (or product_age) to the Features to KEEP list in the Data Schema section,
 
 # \### Features to KEEP (final list)
 
