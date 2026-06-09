@@ -635,5 +635,6 @@ This project should be framed in interviews as:
 - ✅ Stage 2 — Feature engineering (`05.feature_engineering.ipynb`) — R² = 0.483
 - ✅ Stage 3 — Train-test split (in `06.ac_model_experiments.ipynb` cell 5)
 - ✅ Stage 4 — Model experiments (`06.ac_model_experiments.ipynb`) — best R² = 0.5240 (XGBoost one-hot), 9 models compared, model saved
-- ⏳ **Cell 18 (conclusion markdown) of `06.ac_model_experiments.ipynb` — pending** before pivoting to multi-category
-- 🔄 Multi-category pivot (AC → 4 categories) — in progress, scraping stage
+- ⏳ **Cell 18 (conclusion markdown) of `06.ac_model_experiments.ipynb` — Done** before pivoting to multi-category
+- 🔄 Multi-category pivot (AC → 4 categories) — scraping and Parsing done
+- Continuing the cleaning process
