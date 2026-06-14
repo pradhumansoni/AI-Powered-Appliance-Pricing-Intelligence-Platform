@@ -17,11 +17,28 @@ from typing import Dict, Any, Optional, Tuple
 
 # Model path
 MODEL_PATH = Path(__file__).parent.parent / "models/saved_models/multi_category_xgb_pipeline.pkl"
+# Path to the training features DataFrame
+
+# We need this to derive default values for missing user inputs.
+TRAIN_FEATURES_PATH = Path(__file__).parent.parent / "models/dataset/X_train.parquet"
+
 # Load the trained model pipeline
 _pipeline = None
 _preprocessor = None
 _model = None
 _feature_names = None
+
+# Store the original order of features from the training data
+
+_original_feature_order: Optional[list] = None
+
+# Store the default feature values in global variable 
+
+_default_feature_values: Optional[Dict[str, Any]] = None
+
+# NEW: Store the data types of the original training features
+_original_feature_dtypes: Optional[Dict[str, Any]] = None
+
 
 def _load_model():
     """Load the model pipeline and extract components."""
@@ -35,12 +52,99 @@ def _load_model():
     
     return _pipeline, _preprocessor, _model, _feature_names
 
+def _load_default_feature_values():
+    """
+    Load the training feature DataFrame, compute default (mode/median) values,
+    store the original feature order, and store original feature data types.
+    """
+    global _default_feature_values, _original_feature_order, _original_feature_dtypes
+
+    if _default_feature_values is None:
+        try:
+            # print(f"[DEBUG] Attempting to load X_train from: {TRAIN_FEATURES_PATH}") # Removed debug print for clarity
+            X_train_df = pd.read_parquet(TRAIN_FEATURES_PATH)
+            # print(f"[DEBUG] X_train_df loaded successfully. Shape: {X_train_df.shape}") # Removed debug print
+
+            _default_feature_values = {}
+            _original_feature_dtypes = {} # Initialize dtypes dictionary
+            for col in X_train_df.columns:
+                _original_feature_dtypes[col] = X_train_df[col].dtype # Store dtype
+
+                if pd.api.types.is_numeric_dtype(X_train_df[col]):
+                    _default_feature_values[col] = X_train_df[col].median()
+                else:
+                    _default_feature_values[col] = X_train_df[col].mode().iloc[0]
+
+            if 'log_price' in _default_feature_values:
+                del _default_feature_values['log_price']
+            if '__index_level_0__' in _default_feature_values: # Ensure index is not a feature
+                del _default_feature_values['__index_level_0__']
+            if '__index_level_0__' in _original_feature_dtypes: # Remove index dtype too
+                del _original_feature_dtypes['__index_level_0__']
+
+            # Store the exact column order from the training DataFrame, excluding __index_level_0__
+            _original_feature_order = [col for col in X_train_df.columns.tolist() if col != '__index_level_0__']
+            # print(f"[DEBUG] Default feature values, original order, and dtypes set. Number of defaults: {len(_default_feature_values)}") # Removed debug print
+
+        except Exception as e:
+            # print(f"[ERROR] Failed to load default feature values: {e}") # Removed debug print
+            _default_feature_values = None
+            _original_feature_order = None
+            _original_feature_dtypes = None # Also clear dtypes on error
+            raise # Re-raise the exception
+
 # Load model on module import
 _load_model()
+# print("[DEBUG] _load_model called.") # Removed debug print
+
+# Call the function to load default feature values on module import
+_load_default_feature_values()
+# print("[DEBUG] _load_default_feature_values called during module import.") # Removed debug print
+
 
 # --------------------------------------------------------------------------------------------------------------------
 
-#2. Add Prediction Function
+# 2. Function to build a complete feature DataFrame from partial user input
+
+def build_feature_dataframe(user_features: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Constructs a complete feature DataFrame for prediction, filling missing
+    user inputs with default values derived from the training data.
+
+    Args:
+        user_features: A dictionary of features provided by the user.
+                       Can be incomplete.
+
+    Returns:
+        A pandas DataFrame with all expected features, ready for the model.
+        Missing features are filled with defaults.
+    """
+    if _default_feature_values is None or _original_feature_order is None:
+        raise RuntimeError("Default feature values or original feature order not loaded. "
+                           "Ensure _load_default_feature_values() was called successfully.")
+
+    # Start with a copy of the global default feature values.
+    # We copy it to avoid modifying the global dictionary directly.
+    complete_features = _default_feature_values.copy()
+
+    # Iterate through the user-provided features and update our complete_features dictionary.
+    # User-provided values will overwrite the defaults.
+    for key, value in user_features.items():
+        # We only update if the key exists in our expected features
+        # and the value is not None or an empty string, implying it's a valid input.
+        if key in complete_features and value is not None and str(value).strip() != '':
+            complete_features[key] = value
+
+    # Convert the complete_features dictionary into a pandas DataFrame.
+    # We wrap it in a list `[complete_features]` to create a single-row DataFrame.
+    # The `columns=_original_feature_order` ensures that the DataFrame's columns
+    # are in the same order as the training data, which is critical for the model's preprocessor.
+    features_df = pd.DataFrame([complete_features], columns=_original_feature_order)
+
+    return features_df
+
+
+#3. Add Prediction Function
 
 def predict_price(features_df: pd.DataFrame) -> Tuple[float, np.ndarray]:
     """
@@ -62,8 +166,7 @@ def predict_price(features_df: pd.DataFrame) -> Tuple[float, np.ndarray]:
 
 # ------------------------------------------------------------------------------------------------------------------------------------
 
-# 3. Add Pricing Verdict Function
-
+# 4. Add Pricing Verdict Function - CORRECTED FOR SAVINGS LOGIC
 def get_pricing_verdict(observed_price: float, predicted_price: float) -> Dict[str, Any]:
     """
     Determine pricing verdict based on observed vs predicted price.
@@ -74,60 +177,68 @@ def get_pricing_verdict(observed_price: float, predicted_price: float) -> Dict[s
 
     Returns:
         Dictionary containing verdict, difference, percentage,
-        savings, and an explanation message.
+        consumer_advantage (if observed < predicted),
+        consumer_disadvantage (if observed > predicted),
+        message, predicted_price, and observed_price.
     """
 
     difference = observed_price - predicted_price
     percentage = (difference / predicted_price) * 100
 
-    if percentage > 10:
-        # Significantly above fair value
-        verdict = "Overpriced"
-        savings = difference
-        message = f"You may be overpaying by ₹{savings:,.0f}."
+    # Initialize message
+    message = ""
 
-    elif percentage < -10:
-        # Significantly below fair value
-        verdict = "Good Deal"
-        savings = abs(difference)
-        message = (
-            f"Estimated savings of ₹{savings:,.0f} "
-            f"compared to the model's fair value."
-        )
-
-    else:
-        # Within ±10% of fair value
+    if abs(percentage) <= 10:
         verdict = "Fairly Priced"
-        savings = abs(difference)
-
         if difference > 0:
             message = (
-                f"The price is ₹{savings:,.0f} above the estimated fair value "
+                f"The price is ₹{abs(difference):,.0f} above the estimated fair value "
                 f"but still within the normal pricing range."
             )
         elif difference < 0:
             message = (
-                f"The price is ₹{savings:,.0f} below the estimated fair value "
+                f"The price is ₹{abs(difference):,.0f} below the estimated fair value "
                 f"but still within the normal pricing range."
             )
         else:
-            savings = 0
             message = "The observed price matches the estimated fair value."
 
+    elif 10 < percentage <= 20:
+        verdict = "Slightly Overpriced"
+        message = f"You may be slightly overpaying by ₹{difference:,.0f}."
+
+    elif percentage > 20:
+        verdict = "Overpriced"
+        message = f"You may be significantly overpaying by ₹{difference:,.0f}."
+
+    elif -20 <= percentage < -10:
+        verdict = "Good Deal"
+        message = (
+            f"Estimated savings of ₹{abs(difference):,.0f} "
+            f"compared to the model's fair value (a good deal!)."
+        )
+
+    else:  # percentage < -20
+        verdict = "Exceptional Value"
+        message = (
+            f"This is an exceptional value! Estimated savings of ₹{abs(difference):,.0f} "
+            f"compared to the model's fair value."
+        )
+
     return {
-    "verdict": verdict,
-    "difference": difference,
-    "percentage": percentage,
-    "consumer_advantage": max(0, -difference),
-    "consumer_disadvantage": max(0, difference),
-    "message": message,
-    "predicted_price": predicted_price,
-    "observed_price": observed_price
-}
+        "verdict": verdict,
+        "difference": difference,
+        "percentage": percentage,
+        "consumer_advantage": max(0, -difference),    # How much cheaper it is than predicted (a positive value)
+        "consumer_disadvantage": max(0, difference), # How much more expensive it is than predicted (a positive value)
+        "message": message,
+        "predicted_price": predicted_price,
+        "observed_price": observed_price
+    }
 
 # --------------------------------------------------------------------------------------------------------------------------------------
 
-# 4. SHAP Explanation Function
+# 5. SHAP Explanation Function
 
 def get_shap_explanation(features_df: pd.DataFrame, top_n: int = 10) -> Dict[str, Any]:
     """
@@ -167,9 +278,9 @@ def get_shap_explanation(features_df: pd.DataFrame, top_n: int = 10) -> Dict[str
 
 # -------------------------------------------------------------------------------------------------------------------------------------------------------
 
-# 5. Add Brand Premium Interpretation
+# 6. Add Brand Premium Interpretation
 
-def interpret_brand_premium(shap_explanation: Dict, brand_feature_prefix: str = "target_enc_brand_name") -> str:
+def interpret_brand_premium(shap_explanation: Dict, brand_feature_prefix: str = "target_enc__brand_name") -> str:
     """
     Interpret brand premium from SHAP values.
     
@@ -204,10 +315,149 @@ def interpret_brand_premium(shap_explanation: Dict, brand_feature_prefix: str = 
     return (f"About ₹{abs(brand_effect_rupees):,.0f} of the estimated price "
             f"is attributable to brand effects. "
             f"{'Premium' if brand_effect_rupees > 0 else 'Budget'} brands tend to command this adjustment.")
+#-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# NEW: Helper to safely convert to a binary (0/1) integer
+def _to_binary_int(value: Any) -> int:
+    """Converts various inputs to a 0 or 1 integer."""
+    if isinstance(value, str):
+        value_lower = value.lower().strip()
+        if value_lower in ['true', 'yes', '1', 'on']:
+            return 1
+        elif value_lower in ['false', 'no', '0', 'off']:
+            return 0
+    elif isinstance(value, (bool, int, float)):
+        return 1 if value else 0
+    return 0 # Default to 0 if unsure or invalid
+
+# NEW: Function to preprocess user-friendly input into model-friendly features
+def _preprocess_user_input(user_friendly_features: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Takes user-friendly input and transforms it into model-ready features,
+    including standardization, type coercion, and basic feature derivation.
+
+    Args:
+        user_friendly_features: A dictionary of features provided by the user
+                                in a simplified, human-readable format.
+
+    Returns:
+        A dictionary with features mapped to the model's expected nomenclature
+        and data types, ready for build_feature_dataframe.
+    """
+    if _original_feature_dtypes is None:
+        raise RuntimeError("Original feature data types not loaded. Ensure _load_default_feature_values() was called.")
+
+    processed_features = {}
+
+    # 1. Handle 'category' and 'brand_name' (lowercase)
+    category = user_friendly_features.get('category', '').lower().strip()
+    processed_features['category'] = category # Store processed category
+    if 'brand_name' in user_friendly_features:
+        processed_features['brand_name'] = str(user_friendly_features['brand_name']).lower().strip()
+
+    # 2. Handle 'rating' (float)
+    if 'rating' in user_friendly_features and user_friendly_features['rating'] is not None:
+        try:
+            processed_features['rating'] = float(user_friendly_features['rating'])
+        except ValueError:
+            # Handle cases where rating might be non-numeric, default will be used
+            pass
+
+    # 3. Handle Generic Capacity (Capacity_Value, Capacity_Unit) and map to specific 'capacity_X'
+    capacity_value = user_friendly_features.get('capacity_value')
+    capacity_unit = user_friendly_features.get('capacity_unit', '').lower().strip()
+
+    if capacity_value is not None:
+        try:
+            capacity_value = float(capacity_value)
+            if category == 'air conditioner' and capacity_unit == 'ton':
+                processed_features['capacity_ac_tons'] = capacity_value
+            elif category == 'refrigerator' and capacity_unit == 'l':
+                processed_features['capacity_ref_liters'] = capacity_value
+            elif category == 'washing machine' and capacity_unit == 'kg':
+                processed_features['capacity_wm_kg'] = capacity_value
+            # Other categories/units would use defaults
+        except ValueError:
+            pass # Default will be used if conversion fails
+
+    # 4. Handle common binary/boolean features (map to 0 or 1)
+    # Check against _original_feature_dtypes to ensure we only process expected features
+    # Example for 'has_inverter', 'has_wifi', 'star_rating', etc.
+    if 'has_inverter' in user_friendly_features and 'has_inverter' in _original_feature_dtypes:
+        processed_features['has_inverter'] = _to_binary_int(user_friendly_features['has_inverter'])
+    if 'has_wifi' in user_friendly_features and 'has_wifi' in _original_feature_dtypes:
+        processed_features['has_wifi'] = _to_binary_int(user_friendly_features['has_wifi'])
+    if 'star_rating' in user_friendly_features and 'star_rating' in _original_feature_dtypes:
+        try:
+            processed_features['star_rating'] = float(user_friendly_features['star_rating'])
+        except ValueError:
+            pass # Default will be used
+
+    # 5. Handle specific feature flags based on category (user-friendly string to 0/1)
+    # This is where we map things like "Frost Free" to 'ref_frost_free'
+    if category == 'air conditioner':
+        if 'is_split' in user_friendly_features and 'ac_split' in _original_feature_dtypes:
+            processed_features['ac_split'] = _to_binary_int(user_friendly_features['is_split'])
+        if 'has_pm25_filter' in user_friendly_features and 'ac_pm25_filter' in _original_feature_dtypes:
+            processed_features['ac_pm25_filter'] = _to_binary_int(user_friendly_features['has_pm25_filter'])
+        # Add more AC-specific mappings here
+    elif category == 'refrigerator':
+        if 'frost_free' in user_friendly_features and 'ref_frost_free' in _original_feature_dtypes:
+            processed_features['ref_frost_free'] = _to_binary_int(user_friendly_features['frost_free'])
+        if 'door_alarm' in user_friendly_features and 'ref_door_alarm' in _original_feature_dtypes:
+            processed_features['ref_door_alarm'] = _to_binary_int(user_friendly_features['door_alarm'])
+        if 'door_type' in user_friendly_features:
+            door_type_lower = user_friendly_features['door_type'].lower().strip()
+            if door_type_lower == 'single door' and 'ref_single_door' in _original_feature_dtypes:
+                processed_features['ref_single_door'] = 1
+            elif door_type_lower == 'double door' and 'ref_double_door' in _original_feature_dtypes:
+                processed_features['ref_double_door'] = 1
+            # Add other door types
+        # Add more refrigerator-specific mappings here
+    elif category == 'washing machine':
+        if 'load_type' in user_friendly_features:
+            load_type_lower = user_friendly_features['load_type'].lower().strip()
+            if load_type_lower == 'front load' and 'wm_front_load' in _original_feature_dtypes:
+                processed_features['wm_front_load'] = 1
+            elif load_type_lower == 'top load' and 'wm_top_load' in _original_feature_dtypes:
+                processed_features['wm_top_load'] = 1
+        if 'wash_type' in user_friendly_features:
+            wash_type_lower = user_friendly_features['wash_type'].lower().strip()
+            if wash_type_lower == 'fully automatic' and 'wm_fully_automatic' in _original_feature_dtypes:
+                processed_features['wm_fully_automatic'] = 1
+            elif wash_type_lower == 'semi automatic' and 'wm_semi_automatic' in _original_feature_dtypes:
+                processed_features['wm_semi_automatic'] = 1
+        # Add more washing machine-specific mappings here
+
+    # 6. Basic Derivation for 'n_features' (can be expanded later for more complex logic)
+    # This is a very basic count, real derivation should be more sophisticated if 'n_features' is complex.
+    # For now, if user provides some binary flags, we can increment n_features.
+    # A more robust solution would be to count all features that are 1.
+    initial_n_features = 0
+    for key, value in processed_features.items():
+        if key.startswith(('ac_', 'ref_', 'wm_', 'has_')) and value == 1:
+            initial_n_features += 1
+    processed_features['n_features'] = initial_n_features
+
+
+    # Future: Implement more complex feature engineering derivation here (e.g., interactions, squared terms)
+    # For now, if these aren't explicitly derived here, build_feature_dataframe will use defaults.
+    # This is where features like 'capacity_sq', 'rating_sq', 'capacity_n_features', 'capacity_rating',
+    # 'rating_n_features', 'smart_intensity', 'features_above_avg', 'rating_above_avg', 'capacity_above_avg'
+    # would be calculated based on the now-processed basic inputs.
+    # For example:
+    if 'capacity_ac_tons' in processed_features:
+        processed_features['capacity_sq'] = processed_features['capacity_ac_tons'] ** 2
+        # You'd need _default_feature_values['n_features'] to calculate capacity_n_features correctly
+        # processed_features['capacity_n_features'] = processed_features['capacity_ac_tons'] * processed_features.get('n_features', _default_feature_values.get('n_features', 0))
+    # etc.
+
+    return processed_features
+
 
 # --------------------------------------------------------------------------------------------------------------------------------------------------
 
-# 6. Fair Price Estimation Function - UPDATED with partial features input
+# 8. Fair Price Estimation Function - UPDATED with partial features input
 def get_fair_price(features: Dict[str, Any]) -> Dict[str, Any]:
     """
     Get fair price estimate with explanation, handling partial user inputs.
@@ -256,7 +506,7 @@ def get_prediction_range(features: Dict[str, Any], n_samples: int = 100) -> Tupl
     Returns:
         Tuple of (lower_bound, upper_bound) in rupees
     """
-    features_df = pd.DataFrame([features])
+    features_df = build_feature_dataframe(features)
     predicted_price, _ = predict_price(features_df)
     
     # Simplified: use a percentage-based range
@@ -265,111 +515,6 @@ def get_prediction_range(features: Dict[str, Any], n_samples: int = 100) -> Tupl
     
     return (predicted_price - margin, predicted_price + margin)
 
-# ----------------------------------------------------------------------------------------------------------------------
-#                   PARTIAL INPUT INFERENCE
-#-----------------------------------------------------------------------------------------------------------------------
-
-'''
-- To implement this, we need to modify how we prepare the input features before passing them to the model.
-- We have to define a BASE or DEFAULT feature set based on the distribution of that feature.
-When a user does not provide that specific feature details, we will use the default ones.
-'''
-
-# 1. Function to load training data and compute default feature values
-
-# Store the original order of features from the training data
-
-_original_feature_order: Optional[list] = None
-
-# Store the default feature values in global variable 
-
-_default_feature_values: Optional[Dict[str, Any]] = None
-
-# Path to the training features DataFrame
-# We need this to derive default values for missing user inputs.
-TRAIN_FEATURES_PATH = Path(__file__).parent.parent / "models/dataset/X_train.parquet"
-
-def _load_default_feature_values():
-    """Load the training feature DataFrame and compute default (mode/median) values."""
-    global _default_feature_values
-
-    if _default_feature_values is None:
-        # Load the training features dataset
-        # This DataFrame contains all the columns (features) that the model was trained on.
-        X_train_df = pd.read_parquet(TRAIN_FEATURES_PATH)
-        # Initialize an empty dictionary to store the default values
-        _default_feature_values = {}
-
-        # Iterate through each column (feature) in the training data
-        for col in X_train_df.columns:
-            # Check the data type of the column
-            if pd.api.types.is_numeric_dtype(X_train_df[col]): # more safe way
-                # If it's a numeric column, use the median as the default value.
-                # Median is more robust to outliers than the mean.
-                _default_feature_values[col] = X_train_df[col].median()
-            else:
-                # If it's a categorical (object, string, boolean, etc.) column, use the mode.
-                # Mode finds the most frequent value. .iloc[0] is used because mode() can return multiple values if there's a tie.
-                _default_feature_values[col] = X_train_df[col].mode().iloc[0]
-        
-        # Special handling for 'log_price' if it somehow ended up in X_train (it shouldn't, but as a safeguard)
-        if 'log_price' in _default_feature_values:
-            del _default_feature_values['log_price'] # Ensure target is not a feature
-
-        # Store the exact column order from the training DataFrame
-        # This is vital for ensuring consistency when creating new DataFrames
-        # from user input, as the preprocessor expects features in a specific order.
-        _original_feature_order = X_train_df.columns.tolist()
-
-# Call the function to load default feature values on module import
-# This ensures that _default_feature_values is populated when bi_layer.py is first imported.
-_load_default_feature_values()
-
-# ---------------------------------------------------------------------------------------------------------------------------
-
-# 2. Function to build a complete feature DataFrame from partial user input
-
-def build_feature_dataframe(user_features: Dict[str, Any]) -> pd.DataFrame:
-    """
-    Constructs a complete feature DataFrame for prediction, filling missing
-    user inputs with default values derived from the training data.
-
-    Args:
-        user_features: A dictionary of features provided by the user.
-                       Can be incomplete.
-
-    Returns:
-        A pandas DataFrame with all expected features, ready for the model.
-        Missing features are filled with defaults.
-    """
-    if _default_feature_values is None or _original_feature_order is None:
-        raise RuntimeError("Default feature values or original feature order not loaded. "
-                           "Ensure _load_default_feature_values() was called successfully.")
-
-    # Start with a copy of the global default feature values.
-    # We copy it to avoid modifying the global dictionary directly.
-    complete_features = _default_feature_values.copy()
-
-    # Iterate through the user-provided features and update our complete_features dictionary.
-    # User-provided values will overwrite the defaults.
-    for key, value in user_features.items():
-        # We only update if the key exists in our expected features
-        # and the value is not None or an empty string, implying it's a valid input.
-        if key in complete_features and value is not None and str(value).strip() != '':
-            complete_features[key] = value
-
-    # Convert the complete_features dictionary into a pandas DataFrame.
-    # We wrap it in a list `[complete_features]` to create a single-row DataFrame.
-    # The `columns=_original_feature_order` ensures that the DataFrame's columns
-    # are in the same order as the training data, which is critical for the model's preprocessor.
-    features_df = pd.DataFrame([complete_features], columns=_original_feature_order)
-
-    return features_df
 
 
-# ... (existing predict_price function) ...
-# Note: The existing predict_price function still expects a full DataFrame.
-# We will integrate build_feature_dataframe into get_fair_price later.
-
-# ... (rest of your existing code for get_pricing_verdict, get_shap_explanation, etc.) ...
 
