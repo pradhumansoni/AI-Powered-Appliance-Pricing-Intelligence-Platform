@@ -494,6 +494,22 @@ Recommendations should prioritize:
 2. Savings,
 3. Value.
 
+This update adds the rationale and implementation details of the BI layer to your project encyclopedia.
+
+```
+## Phase 5: Business Intelligence & Graceful Degradation
+
+**Rationale:**
+A raw model prediction is not a product. To make this "Intelligence," we implemented a layer that interprets the numbers. We also recognized that users rarely know all 65+ technical specifications.
+
+**Key Decisions:**
+1. **Verdict Thresholds:** ±10% for Fair, >20% for Overpriced. This provides a buffer for market volatility.
+2. **Brand Premium:** Isolated the SHAP values for brand encoding and converted them from log-space back to Rupees to provide a concrete "Brand Tax" or "Brand Discount" estimate.
+3. **Imputation Strategy:** Instead of standard ML imputation, we use the median/mode of the training set as "Default Assumptions" for unknown features.
+4. **Mapping Layer:** Created `_preprocess_user_input` to translate human terms (e.g., "Front Load") to internal feature names (`wm_front_load`).
+
+**Technical Achievement:**
+The system can now generate a full 65-feature inference row from just 4 user inputs (Category, Brand, Value, Unit) while maintaining prediction stability.
 ---
 
 # INTERVIEW FRAMING
