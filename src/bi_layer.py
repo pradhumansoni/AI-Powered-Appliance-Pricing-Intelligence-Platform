@@ -127,6 +127,9 @@ def build_feature_dataframe(user_features: Dict[str, Any]) -> pd.DataFrame:
     # We copy it to avoid modifying the global dictionary directly.
     complete_features = _default_feature_values.copy()
 
+    # Debug: Print the default features for comparison
+    print(f"[DEBUG BI] Default features for comparison: {complete_features}")
+
     # Iterate through the user-provided features and update our complete_features dictionary.
     # User-provided values will overwrite the defaults.
     for key, value in user_features.items():
@@ -140,6 +143,10 @@ def build_feature_dataframe(user_features: Dict[str, Any]) -> pd.DataFrame:
     # The `columns=_original_feature_order` ensures that the DataFrame's columns
     # are in the same order as the training data, which is critical for the model's preprocessor.
     features_df = pd.DataFrame([complete_features], columns=_original_feature_order)
+
+    # Debug: Print the final DataFrame's relevant columns
+    print(f"[DEBUG BI] Final DataFrame head for prediction:\n{features_df.head()}")
+
 
     return features_df
 
@@ -317,6 +324,7 @@ def interpret_brand_premium(shap_explanation: Dict, brand_feature_prefix: str = 
             f"{'Premium' if brand_effect_rupees > 0 else 'Budget'} brands tend to command this adjustment.")
 #-------------------------------------------------------------------------------------------------------------------------------------------------------
 
+
 # NEW: Helper to safely convert to a binary (0/1) integer
 def _to_binary_int(value: Any) -> int:
     """Converts various inputs to a 0 or 1 integer."""
@@ -355,102 +363,215 @@ def _preprocess_user_input(user_friendly_features: Dict[str, Any]) -> Dict[str, 
     if 'brand_name' in user_friendly_features:
         processed_features['brand_name'] = str(user_friendly_features['brand_name']).lower().strip()
 
-    # 2. Handle 'rating' (float)
+    # 2. Handle 'rating' (float) and 'star_rating' (float)
     if 'rating' in user_friendly_features and user_friendly_features['rating'] is not None:
         try:
             processed_features['rating'] = float(user_friendly_features['rating'])
         except ValueError:
-            # Handle cases where rating might be non-numeric, default will be used
-            pass
+            pass # Default will be used
 
-    # 3. Handle Generic Capacity (Capacity_Value, Capacity_Unit) and map to specific 'capacity_X'
-    capacity_value = user_friendly_features.get('capacity_value')
-
-    if capacity_value is not None:
-        try:
-            capacity_value = float(capacity_value)
-            if category == 'air conditioner':
-                processed_features['capacity_ac_tons'] = capacity_value
-            elif category == 'refrigerator':
-                processed_features['capacity_ref_liters'] = capacity_value
-            elif category == 'washing machine':
-                processed_features['capacity_wm_kg'] = capacity_value
-            
-        except ValueError:
-            pass # Default will be used if conversion fails
-
-    # 4. Handle common binary/boolean features (map to 0 or 1)
-    # Check against _original_feature_dtypes to ensure we only process expected features
-    # Example for 'has_inverter', 'has_wifi', 'star_rating', etc.
-    if 'has_inverter' in user_friendly_features and 'has_inverter' in _original_feature_dtypes:
-        processed_features['has_inverter'] = _to_binary_int(user_friendly_features['has_inverter'])
-    if 'has_wifi' in user_friendly_features and 'has_wifi' in _original_feature_dtypes:
-        processed_features['has_wifi'] = _to_binary_int(user_friendly_features['has_wifi'])
-    if 'star_rating' in user_friendly_features and 'star_rating' in _original_feature_dtypes:
+    if 'star_rating' in user_friendly_features and user_friendly_features['star_rating'] is not None:
         try:
             processed_features['star_rating'] = float(user_friendly_features['star_rating'])
         except ValueError:
             pass # Default will be used
 
-    # 5. Handle specific feature flags based on category (user-friendly string to 0/1)
-    # This is where we map things like "Frost Free" to 'ref_frost_free'
-    if category == 'air conditioner':
-        if 'is_split' in user_friendly_features and 'ac_split' in _original_feature_dtypes:
-            processed_features['ac_split'] = _to_binary_int(user_friendly_features['is_split'])
-        if 'has_pm25_filter' in user_friendly_features and 'ac_pm25_filter' in _original_feature_dtypes:
-            processed_features['ac_pm25_filter'] = _to_binary_int(user_friendly_features['has_pm25_filter'])
-        # Add more AC-specific mappings here
-    elif category == 'refrigerator':
-        if 'frost_free' in user_friendly_features and 'ref_frost_free' in _original_feature_dtypes:
-            processed_features['ref_frost_free'] = _to_binary_int(user_friendly_features['frost_free'])
-        if 'door_alarm' in user_friendly_features and 'ref_door_alarm' in _original_feature_dtypes:
-            processed_features['ref_door_alarm'] = _to_binary_int(user_friendly_features['door_alarm'])
-        if 'door_type' in user_friendly_features:
-            door_type_lower = user_friendly_features['door_type'].lower().strip()
-            if door_type_lower == 'single door' and 'ref_single_door' in _original_feature_dtypes:
-                processed_features['ref_single_door'] = 1
-            elif door_type_lower == 'double door' and 'ref_double_door' in _original_feature_dtypes:
-                processed_features['ref_double_door'] = 1
-            # Add other door types
-        # Add more refrigerator-specific mappings here
-    elif category == 'washing machine':
-        if 'load_type' in user_friendly_features:
-            load_type_lower = user_friendly_features['load_type'].lower().strip()
-            if load_type_lower == 'front load' and 'wm_front_load' in _original_feature_dtypes:
-                processed_features['wm_front_load'] = 1
-            elif load_type_lower == 'top load' and 'wm_top_load' in _original_feature_dtypes:
-                processed_features['wm_top_load'] = 1
-        if 'wash_type' in user_friendly_features:
-            wash_type_lower = user_friendly_features['wash_type'].lower().strip()
-            if wash_type_lower == 'fully automatic' and 'wm_fully_automatic' in _original_feature_dtypes:
-                processed_features['wm_fully_automatic'] = 1
-            elif wash_type_lower == 'semi automatic' and 'wm_semi_automatic' in _original_feature_dtypes:
-                processed_features['wm_semi_automatic'] = 1
-        # Add more washing machine-specific mappings here
+    # 3. Handle Generic Capacity (capacity_value) and map to specific 'capacity_X'
+    capacity_value = user_friendly_features.get('capacity_value')
 
-    # 6. Basic Derivation for 'n_features' (can be expanded later for more complex logic)
-    # This is a very basic count, real derivation should be more sophisticated if 'n_features' is complex.
-    # For now, if user provides some binary flags, we can increment n_features.
-    # A more robust solution would be to count all features that are 1.
+    if capacity_value is not None:
+        try:
+            capacity_value = float(capacity_value)
+            # Use category to map to the correct capacity column
+            if category == 'ac': # Use 'ac' as category from preprocessed value
+                processed_features['capacity_ac_tons'] = capacity_value
+            elif category == 'refrigerator':
+                processed_features['capacity_ref_liters'] = capacity_value
+            elif category == 'washing machine':
+                processed_features['capacity_wm_kg'] = capacity_value
+        except ValueError:
+            pass # Default will be used if conversion fails
+
+    # 4. Handle common binary/boolean features (map to 0 or 1)
+    # Check against _original_feature_dtypes to ensure we only process expected features
+    for key in ['has_inverter', 'has_wifi', 'has_voice_control', 'has_app_control']: # Added other smart features
+        if key in user_friendly_features and key in _original_feature_dtypes:
+            processed_features[key] = _to_binary_int(user_friendly_features[key])
+            
+    # Also handle has_star_rating if star_rating is provided
+    if 'star_rating' in processed_features and processed_features['star_rating'] > 0:
+        processed_features['has_star_rating'] = 1
+    else:
+        processed_features['has_star_rating'] = 0
+
+
+    # 5. Handle specific feature flags based on category (user-friendly string to 0/1)
+    # Iterate through ALL user_friendly_features and map them if they exist in _original_feature_dtypes
+    
+    # --- AC Features ---
+    if category == 'ac':
+        for key in [
+            'ac_split', 'ac_window', 'ac_pm25_filter', 'ac_hepa_filter', 
+            'ac_auto_clean', 'ac_hot_and_cold', 'ac_copper_condenser', 
+            'ac_Dehumidification', 'ac_Turbo Mode', 'ac_Self Diagnosis'
+        ]:
+            if key in user_friendly_features and key in _original_feature_dtypes:
+                processed_features[key] = _to_binary_int(user_friendly_features[key])
+    
+    # --- Refrigerator Features ---
+    elif category == 'refrigerator':
+        for key in [
+            'ref_single_door', 'ref_multi_door', 'ref_chest_freezer', 
+            'ref_side_door', 'ref_french_door', 'ref_double_door', 
+            'ref_triple_door', 'ref_frost_free', 'ref_convertible', 
+            'ref_door_alarm', 'ref_door_lock', 'ref_dispenser', 
+            'ref_door_display', 'ref_mini'
+        ]:
+            if key in user_friendly_features and key in _original_feature_dtypes:
+                processed_features[key] = _to_binary_int(user_friendly_features[key])
+        
+        # Explicitly handle door_type if you plan to use it as a single input
+        # if 'door_type' in user_friendly_features:
+        #     door_type_lower = user_friendly_features['door_type'].lower().strip()
+        #     if door_type_lower == 'single door' and 'ref_single_door' in _original_feature_dtypes: processed_features['ref_single_door'] = 1
+        #     elif door_type_lower == 'double door' and 'ref_double_door' in _original_feature_dtypes: processed_features['ref_double_door'] = 1
+        #     # Add other door types (ensure only one is 1)
+
+    # --- Washing Machine Features ---
+    elif category == 'washing machine':
+        for key in [
+            'wm_fully_automatic', 'wm_semi_automatic', 'wm_with_dryer', 
+            'wm_washer_only', 'wm_dryer_only', 'wm_front_load', 
+            'wm_top_load', 'wm_inbuilt_heater', 'wm_quick_wash', 
+            'wm_ss_tub', 'wm_child_lock', 'wm_shock_proof', 
+            'wm_display'
+        ]:
+            if key in user_friendly_features and key in _original_feature_dtypes:
+                processed_features[key] = _to_binary_int(user_friendly_features[key])
+        
+        # Explicitly handle load_type/wash_type if you plan to use it as a single input
+        # if 'load_type' in user_friendly_features:
+        #     load_type_lower = user_friendly_features['load_type'].lower().strip()
+        #     if load_type_lower == 'front load' and 'wm_front_load' in _original_feature_dtypes: processed_features['wm_front_load'] = 1
+        #     elif load_type_lower == 'top load' and 'wm_top_load' in _original_feature_dtypes: processed_features['wm_top_load'] = 1
+
+
+    # 6. Basic Derivation for 'n_features' (CORRECTED)
+    # This should count how many 1s are in the feature flags for the current category
+    # It also needs to count general features like has_inverter, has_star_rating
+    
     initial_n_features = 0
-    for key, value in processed_features.items():
-        if key.startswith(('ac_', 'ref_', 'wm_', 'has_')) and value == 1:
+    # Count general binary features
+    for key in ['has_inverter', 'has_star_rating', 'has_wifi', 'has_voice_control', 'has_app_control']:
+        if key in processed_features and processed_features[key] == 1:
             initial_n_features += 1
+
+    # Count category-specific binary features
+    if category == 'ac':
+        for key in [
+            'ac_split', 'ac_window', 'ac_pm25_filter', 'ac_hepa_filter', 
+            'ac_auto_clean', 'ac_hot_and_cold', 'ac_copper_condenser', 
+            'ac_Dehumidification', 'ac_Turbo Mode', 'ac_Self Diagnosis'
+        ]:
+            if key in processed_features and processed_features[key] == 1:
+                initial_n_features += 1
+    elif category == 'refrigerator':
+        for key in [
+            'ref_single_door', 'ref_multi_door', 'ref_chest_freezer', 
+            'ref_side_door', 'ref_french_door', 'ref_double_door', 
+            'ref_triple_door', 'ref_frost_free', 'ref_convertible', 
+            'ref_door_alarm', 'ref_door_lock', 'ref_dispenser', 
+            'ref_door_display', 'ref_mini'
+        ]:
+            if key in processed_features and processed_features[key] == 1:
+                initial_n_features += 1
+    elif category == 'washing machine':
+        for key in [
+            'wm_fully_automatic', 'wm_semi_automatic', 'wm_with_dryer', 
+            'wm_washer_only', 'wm_dryer_only', 'wm_front_load', 
+            'wm_top_load', 'wm_inbuilt_heater', 'wm_quick_wash', 
+            'wm_ss_tub', 'wm_child_lock', 'wm_shock_proof', 
+            'wm_display'
+        ]:
+            if key in processed_features and processed_features[key] == 1:
+                initial_n_features += 1
+
     processed_features['n_features'] = initial_n_features
 
 
-    # Future: Implement more complex feature engineering derivation here (e.g., interactions, squared terms)
-    # For now, if these aren't explicitly derived here, build_feature_dataframe will use defaults.
-    # This is where features like 'capacity_sq', 'rating_sq', 'capacity_n_features', 'capacity_rating',
-    # 'rating_n_features', 'smart_intensity', 'features_above_avg', 'rating_above_avg', 'capacity_above_avg'
-    # would be calculated based on the now-processed basic inputs.
-    # For example:
+    # 7. Derivations for Engineered Features (If they exist in _original_feature_dtypes)
+    # These typically use values that are now in processed_features
+    # We should only calculate these if the base components exist
+    
+    # Capacity Squared
     if 'capacity_ac_tons' in processed_features:
         processed_features['capacity_sq'] = processed_features['capacity_ac_tons'] ** 2
-        # You'd need _default_feature_values['n_features'] to calculate capacity_n_features correctly
-        # processed_features['capacity_n_features'] = processed_features['capacity_ac_tons'] * processed_features.get('n_features', _default_feature_values.get('n_features', 0))
-    # etc.
+    elif 'capacity_ref_liters' in processed_features:
+        processed_features['capacity_sq'] = processed_features['capacity_ref_liters'] ** 2
+    elif 'capacity_wm_kg' in processed_features:
+        processed_features['capacity_sq'] = processed_features['capacity_wm_kg'] ** 2
+    # Ensure n_features_sq is calculated if n_features is present
+    if 'n_features' in processed_features:
+        processed_features['n_features_sq'] = processed_features['n_features'] ** 2
+    if 'star_rating' in processed_features: # assuming rating is same as star_rating
+        processed_features['rating_sq'] = processed_features['star_rating'] ** 2
 
+    # Interaction terms
+    if 'capacity_ac_tons' in processed_features and 'n_features' in processed_features:
+        processed_features['capacity_n_features'] = processed_features['capacity_ac_tons'] * processed_features['n_features']
+    elif 'capacity_ref_liters' in processed_features and 'n_features' in processed_features:
+        processed_features['capacity_n_features'] = processed_features['capacity_ref_liters'] * processed_features['n_features']
+    elif 'capacity_wm_kg' in processed_features and 'n_features' in processed_features:
+        processed_features['capacity_n_features'] = processed_features['capacity_wm_kg'] * processed_features['n_features']
+
+    if 'capacity_ac_tons' in processed_features and 'star_rating' in processed_features:
+        processed_features['capacity_rating'] = processed_features['capacity_ac_tons'] * processed_features['star_rating']
+    elif 'capacity_ref_liters' in processed_features and 'star_rating' in processed_features:
+        processed_features['capacity_rating'] = processed_features['capacity_ref_liters'] * processed_features['star_rating']
+    elif 'capacity_wm_kg' in processed_features and 'star_rating' in processed_features:
+        processed_features['capacity_rating'] = processed_features['capacity_wm_kg'] * processed_features['star_rating']
+        
+    if 'star_rating' in processed_features and 'n_features' in processed_features:
+        processed_features['rating_n_features'] = processed_features['star_rating'] * processed_features['n_features']
+
+    # Smart Intensity (Sum of smart features)
+    smart_intensity = 0
+    for key in ['has_wifi', 'has_voice_control', 'has_app_control']:
+        if key in processed_features and processed_features[key] == 1:
+            smart_intensity += 1
+    processed_features['smart_intensity'] = smart_intensity
+
+    # Category-specific premium scores (if they exist in _original_feature_dtypes)
+    if category == 'ac':
+        processed_features['ac_premium_features'] = sum(
+            processed_features.get(k, 0) for k in [
+                'ac_pm25_filter', 'ac_hepa_filter', 'ac_auto_clean', 
+                'ac_hot_and_cold', 'ac_copper_condenser', 'ac_Dehumidification', 
+                'ac_Turbo Mode', 'ac_Self Diagnosis'
+            ] if k in processed_features
+        )
+    elif category == 'refrigerator':
+        processed_features['ref_door_complexity'] = sum(
+            processed_features.get(k, 0) for k in [
+                'ref_multi_door', 'ref_french_door', 'ref_double_door', 
+                'ref_triple_door', 'ref_door_display'
+            ] if k in processed_features
+        )
+    elif category == 'washing machine':
+        processed_features['wm_tech_level'] = sum(
+            processed_features.get(k, 0) for k in [
+                'wm_fully_automatic', 'wm_with_dryer', 'wm_front_load', 
+                'wm_inbuilt_heater', 'wm_quick_wash', 'wm_child_lock', 
+                'wm_display'
+            ] if k in processed_features
+        )
+    
+    # Statistical features like 'features_above_avg' etc. usually require global stats from X_train
+    # and are hard to calculate purely from user input. build_feature_dataframe will use defaults for these.
+
+    # Debug: Print the processed features before returning
+    print(f"[DEBUG BI] Processed features (before build_feature_dataframe): {processed_features}")
+    
     return processed_features
 
 
