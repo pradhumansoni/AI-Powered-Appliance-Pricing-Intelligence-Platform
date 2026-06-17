@@ -21,10 +21,14 @@ from src.recommender import ApplianceRecommender
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Smart Buy: AI Price & Deal Assistant", layout="wide")
 
+# --- 2. HEADER & DESCRIPTION ---
 st.title("🛒 Smart Buy: AI Price & Deal Assistant")
-st.markdown("Analyze the best deals or explore fair market prices for home appliances.")
+st.markdown("""
+Find fair market prices and discover the best alternatives for home appliances.
+Our AI analyzes prices and recommends similar products within your budget range.
+""")
 
-# --- 2. LOADING THE MODELS ---
+# --- 3. LOADING THE MODELS ---
 @st.cache_resource
 def load_resources():
     pipeline_path = Path(__file__).parent.parent / "models/saved_models/multi_category_xgb_pipeline.pkl"
@@ -43,7 +47,71 @@ except Exception as e:
     st.sidebar.error(f"❌ Critical error during app initialization: {e}")
     st.stop()
 
-# --- 3. USER INPUT SECTION ---
+# --- 4. HELPER FUNCTIONS FOR DISPLAY ---
+
+def format_recommendation_score(score):
+    """
+    Turns a cosine similarity score (0 to 1) into a human-readable percentage.
+    Shows how well each product matches the user's stated preferences.
+    """
+    pct = score * 100
+    
+    if pct >= 90:
+        return f"⭐⭐⭐ {pct:.0f}% match"
+    elif pct >= 75:
+        return f"⭐⭐ {pct:.0f}% match"
+    elif pct >= 60:
+        return f"⭐ {pct:.0f}% match"
+    else:
+        return f"{pct:.0f}% match"
+
+
+def display_recommendations(recommendations, category, max_per_brand):
+    """
+    Displays recommendation results in a clean, readable table.
+    Shows recommendations based on feature similarity within the user's budget range.
+    """
+    if not recommendations:
+        st.info("💡 No recommendations found. Try adjusting your preferences or capacity.")
+        return
+
+    recs_df = pd.DataFrame(recommendations)
+
+    # Pick which columns to show based on category
+    if category == "AC":
+        display_cols = ['brand_name', 'capacity_ac_tons', 'star_rating', 'fair_price', 'recommendation_score']
+        display_names = ['Brand', 'Capacity (Tons)', 'Stars', 'Fair Price', 'Match Score']
+    elif category == "Refrigerator":
+        display_cols = ['brand_name', 'capacity_ref_liters', 'star_rating', 'fair_price', 'recommendation_score', 'ref_frost_free', 'ref_double_door']
+        display_names = ['Brand', 'Capacity (Litres)', 'Stars', 'Fair Price', 'Match Score', 'Frost Free', 'Double Door']
+    else:  # Washing Machine
+        display_cols = ['brand_name', 'capacity_wm_kg', 'star_rating', 'fair_price', 'recommendation_score', 'wm_fully_automatic', 'wm_front_load']
+        display_names = ['Brand', 'Capacity (Kg)', 'Stars', 'Fair Price', 'Match Score', 'Fully Automatic', 'Front Load']
+
+    # Defensive check for missing columns
+    missing_cols = [c for c in display_cols if c not in recs_df.columns]
+    if missing_cols:
+        st.error(f"⚠️ Missing columns: {missing_cols}. Check recommender.pool.columns")
+        return
+
+    recs_df_display = recs_df[display_cols].copy()
+    recs_df_display.columns = display_names
+
+    # Format Fair Price with Rupee symbol and commas
+    recs_df_display['Fair Price'] = recs_df_display['Fair Price'].apply(lambda x: f"₹ {x:,.0f}")
+
+    # Format Match Score as a percentage
+    recs_df_display['Match Score'] = recs_df['recommendation_score'].apply(format_recommendation_score)
+
+    st.dataframe(recs_df_display, use_container_width=True)
+    st.caption(
+        f"✨ Showing {len(recs_df_display)} recommendations | "
+        f"Match Score = how well the product matches your preferences | "
+        f"Fair Price = estimated market price"
+    )
+
+
+# --- 5. USER INPUT SECTION ---
 st.header("🔍 Appliance Specifications")
 
 col1, col2 = st.columns(2)
@@ -51,37 +119,87 @@ col1, col2 = st.columns(2)
 user_friendly_input = {}
 
 with col1:
-    user_friendly_input['category'] = st.selectbox("Select Category", ["AC", "Refrigerator", "Washing Machine"])
-    user_friendly_input['brand_name'] = st.text_input("Enter Brand Name (e.g., LG, Samsung, Whirlpool)", "LG")
+    # Category selection with user-friendly display names
+    category_display = st.selectbox(
+        "Select Category",
+        ["Air Conditioner", "Refrigerator", "Washing Machine"],
+        help="Choose the type of appliance you're interested in"
+    )
     
-    if user_friendly_input['category'] == "AC":
-        user_friendly_input['capacity_value'] = st.number_input("Capacity in Tons", min_value=0.5, max_value=3.0, value=1.5, step=0.5)
-    elif user_friendly_input['category'] == "Refrigerator":
-        user_friendly_input['capacity_value'] = st.number_input("Capacity in Litres", min_value=100, max_value=1000, value=250, step=10)
+    # Map display names back to internal names used by the model
+    category_map = {
+        "Air Conditioner": "AC",
+        "Refrigerator": "Refrigerator",
+        "Washing Machine": "WashingMachine"
+    }
+    user_friendly_input['category'] = category_map[category_display]
+    
+    user_friendly_input['brand_name'] = st.text_input(
+        "Brand Name",
+        value="LG",
+        help="e.g., LG, Samsung, Whirlpool, IFB"
+    )
+    
+    # Capacity input with category-specific units
+    if category_display == "Air Conditioner":
+        user_friendly_input['capacity_value'] = st.number_input(
+            "Capacity (Tons)",
+            min_value=0.5,
+            max_value=3.0,
+            value=1.5,
+            step=0.5
+        )
+    elif category_display == "Refrigerator":
+        user_friendly_input['capacity_value'] = st.number_input(
+            "Capacity (Litres)",
+            min_value=100,
+            max_value=1000,
+            value=250,
+            step=10
+        )
     else:  # Washing Machine
-        user_friendly_input['capacity_value'] = st.number_input("Capacity in Kg", min_value=5, max_value=20, value=7, step=1)
+        user_friendly_input['capacity_value'] = st.number_input(
+            "Capacity (Kg)",
+            min_value=5,
+            max_value=20,
+            value=7,
+            step=1
+        )
 
 with col2:
-    user_friendly_input['star_rating'] = st.slider("Star Rating", 1, 5, 3)
-    user_friendly_input['has_inverter'] = st.checkbox("Inverter Technology", value=True) # General for all categories
+    user_friendly_input['star_rating'] = st.slider(
+        "Star Rating",
+        min_value=1,
+        max_value=5,
+        value=3,
+        help="Quality rating (1-5 stars)"
+    )
+    
+    user_friendly_input['has_inverter'] = st.checkbox(
+        "Inverter Technology",
+        value=True,
+        help="More energy efficient"
+    )
 
-    # --- CATEGORY-SPECIFIC CHECKBOXES ---
-    if user_friendly_input['category'] == "AC":
+    # --- CATEGORY-SPECIFIC FEATURES ---
+    if category_display == "Air Conditioner":
+        st.subheader("AC Features")
         user_friendly_input['ac_split'] = st.checkbox("Split AC", value=True)
+        user_friendly_input['ac_copper_condenser'] = st.checkbox("Copper Condenser", value=True)
         user_friendly_input['ac_pm25_filter'] = st.checkbox("PM 2.5 Filter", value=False)
         user_friendly_input['ac_hepa_filter'] = st.checkbox("HEPA Filter", value=False)
         user_friendly_input['ac_auto_clean'] = st.checkbox("Auto Clean", value=False)
         user_friendly_input['ac_hot_and_cold'] = st.checkbox("Hot & Cold", value=False)
-        user_friendly_input['ac_copper_condenser'] = st.checkbox("Copper Condenser", value=True)
         user_friendly_input['ac_Dehumidification'] = st.checkbox("Dehumidification", value=True)
         user_friendly_input['ac_Turbo Mode'] = st.checkbox("Turbo Mode", value=True)
         user_friendly_input['ac_Self Diagnosis'] = st.checkbox("Self Diagnosis", value=False)
 
-    elif user_friendly_input['category'] == "Refrigerator":
+    elif category_display == "Refrigerator":
+        st.subheader("Refrigerator Features")
         user_friendly_input['ref_frost_free'] = st.checkbox("Frost Free", value=True)
+        user_friendly_input['ref_double_door'] = st.checkbox("Double Door", value=True)
         user_friendly_input['ref_multi_door'] = st.checkbox("Multi-Door", value=False)
         user_friendly_input['ref_french_door'] = st.checkbox("French Door", value=False)
-        user_friendly_input['ref_double_door'] = st.checkbox("Double Door", value=True) 
         user_friendly_input['ref_convertible'] = st.checkbox("Convertible Freezer", value=False)
         user_friendly_input['ref_door_alarm'] = st.checkbox("Door Alarm", value=True)
         user_friendly_input['ref_door_lock'] = st.checkbox("Door Lock", value=False)
@@ -89,10 +207,11 @@ with col2:
         user_friendly_input['ref_door_display'] = st.checkbox("Door Display", value=True)
 
     else:  # Washing Machine
+        st.subheader("Washing Machine Features")
         user_friendly_input['wm_fully_automatic'] = st.checkbox("Fully Automatic", value=True)
-        user_friendly_input['wm_with_dryer'] = st.checkbox("Washer Dryer Combo", value=False)
-        user_friendly_input['wm_front_load'] = st.checkbox("Front Load", value=True) 
+        user_friendly_input['wm_front_load'] = st.checkbox("Front Load", value=True)
         user_friendly_input['wm_top_load'] = st.checkbox("Top Load", value=False)
+        user_friendly_input['wm_with_dryer'] = st.checkbox("Washer Dryer Combo", value=False)
         user_friendly_input['wm_inbuilt_heater'] = st.checkbox("Inbuilt Heater", value=True)
         user_friendly_input['wm_quick_wash'] = st.checkbox("Quick Wash", value=True)
         user_friendly_input['wm_child_lock'] = st.checkbox("Child Lock", value=True)
@@ -100,30 +219,31 @@ with col2:
         user_friendly_input['wm_display'] = st.checkbox("Digital Display", value=True)
 
 
-# --- 4. MODE SELECTION ---
+# --- 6. MODE SELECTION ---
 st.divider()
-st.header("🎯 Choose Your Goal")
+st.header("🎯 What would you like to do?")
 mode = st.radio(
-    "What would you like to do?",
+    "Choose an option:",
     ["Explore Fair Prices", "Analyze a Deal"],
-    horizontal=True
+    horizontal=True,
+    help="Explore to see estimated prices, or Analyze to check if a specific price is a good deal"
 )
 
-# --- Add Observed Price Input for "Analyze a Deal" mode ---
+# --- Observed Price Input for "Analyze a Deal" mode ---
 observed_price = None
 if mode == "Analyze a Deal":
     observed_price = st.number_input(
-        "Enter the observed price (what you saw in the market): ₹", 
-        min_value=1000, value=30000, step=1000
+        "Enter the price you found (₹)",
+        min_value=1000,
+        value=30000,
+        step=1000,
+        help="What price did you see in the market?"
     )
 
+st.divider()
 
-st.divider() # Separator before results
-
-# --- 5. EXECUTION BUTTON ---
-submit_button = st.button("Get Insights!")
-
-if submit_button:
+# --- 7. EXECUTION BUTTON ---
+if st.button("🔍 Get Insights", use_container_width=True):
     # --- PREPROCESSING USER INPUT ---
     processed_features = _preprocess_user_input(user_friendly_input)
     features_df = build_feature_dataframe(processed_features)
@@ -135,116 +255,90 @@ if submit_button:
     lower_bound, upper_bound = get_prediction_range(processed_features)
 
     if mode == "Explore Fair Prices":
-        st.subheader(f"💡 Fair Price Estimation for your {user_friendly_input['category']}")
+        st.subheader(f"💡 Fair Price Analysis for {category_display}")
 
-        st.metric(
-            label=f"Estimated Fair Price", 
-            value=f"₹ {predicted_price:,.0f}"
-        )
-        st.write(f"*(Expected range: ₹{lower_bound:,.0f} - ₹{upper_bound:,.0f})*")
-        st.markdown(f"**Brand Impact:** {brand_premium_text}")
-
-        st.subheader("📊 Key Price Drivers (SHAP Explanation)")
-        shap_df = pd.DataFrame(shap_explanation['top_features'], columns=['Feature', 'Contribution'])
-        st.dataframe(shap_df.style.format({"Contribution": "{:,.2f}"}), width='stretch')
-        st.caption("Positive contribution increases price, negative contribution decreases price.")
-
-        st.subheader("🌟 Smart Alternatives for Better Value")
-        recommendations = recommender_engine.get_recommendations(user_friendly_input, n=3)
-        
-        if recommendations:
-            recs_df = pd.DataFrame(recommendations)
-            
-            if user_friendly_input['category'] == "AC":
-                display_cols = ['brand_name', 'capacity_ac_tons', 'star_rating', 'actual_price', 'fair_price', 'value_score']
-                display_names = ['Brand', 'Capacity (Tons)', 'Stars', 'Market Price', 'Fair Price', 'Value Score']
-            elif user_friendly_input['category'] == "Refrigerator":
-                display_cols = ['brand_name', 'capacity_ref_liters', 'star_rating', 'actual_price', 'fair_price', 'value_score', 'ref_frost_free', 'ref_double_door']
-                display_names = ['Brand', 'Capacity (Litres)', 'Stars', 'Market Price', 'Fair Price', 'Value Score', 'Frost Free', 'Double Door']
-            else: # Washing Machine
-                display_cols = ['brand_name', 'capacity_wm_kg', 'star_rating', 'actual_price', 'fair_price', 'value_score', 'wm_fully_automatic', 'wm_front_load']
-                display_names = ['Brand', 'Capacity (Kg)', 'Stars', 'Market Price', 'Fair Price', 'Value Score', 'Fully Automatic', 'Front Load']
-            
-            recs_df_display = recs_df[display_cols].copy()
-            recs_df_display.columns = display_names
-            
-            for col in ['Market Price', 'Fair Price']:
-                if col in recs_df_display.columns:
-                    recs_df_display[col] = recs_df_display[col].apply(lambda x: f"₹ {x:,.0f}")
-            
-            recs_df_display['Value Score'] = recs_df_display['Value Score'].apply(lambda x: f"{x:.2f}")
-
-            st.dataframe(recs_df_display, width='stretch')
-            st.caption("Higher 'Value Score' indicates a better deal (Fair Price > Market Price).")
-        else:
-            st.info("No alternative recommendations found with similar specifications.")
-
-    else: # mode == "Analyze a Deal"
-        st.subheader(f"💰 Deal Analysis for your {user_friendly_input['category']}")
-
-        if observed_price is None:
-            st.warning("Please enter an observed price to analyze the deal.")
-        else:
-            # Get the pricing verdict using the observed price and our predicted fair price
-            deal_verdict = get_pricing_verdict(observed_price=observed_price, predicted_price=predicted_price)
-
-            st.metric(
-                label="Observed Price",
-                value=f"₹ {observed_price:,.0f}"
-            )
+        # Display the predicted fair price prominently
+        col1, col2, col3 = st.columns(3)
+        with col1:
             st.metric(
                 label="Estimated Fair Price",
-                value=f"₹ {predicted_price:,.0f}"
+                value=f"₹ {predicted_price:,.0f}",
+                delta=None
             )
-            st.write(f"*(Expected range: ₹{lower_bound:,.0f} - ₹{upper_bound:,.0f})*")
+        with col2:
+            st.metric(
+                label="Price Range",
+                value=f"₹ {lower_bound:,.0f}",
+                delta=f"to ₹ {upper_bound:,.0f}"
+            )
+        with col3:
+            st.info(f"📊 Based on {category_display} specifications and market data")
 
-            # Display the verdict with appropriate styling
+        st.write(f"**Brand Impact:** {brand_premium_text}")
+
+        st.subheader("📊 What Affects the Price?")
+        shap_df = pd.DataFrame(shap_explanation['top_features'], columns=['Feature', 'Contribution (₹)'])
+        st.dataframe(shap_df.style.format({"Contribution (₹)": "₹{:,.0f}"}), use_container_width=True)
+        st.caption("Shows which features increase or decrease the price the most")
+
+        st.subheader("⭐ Smart Recommendations (5 Best Matches)")
+        st.write("Based on your preferences, within your expected budget range:")
+        recommendations = recommender_engine.get_recommendations(user_friendly_input, n=5)
+        display_recommendations(recommendations, user_friendly_input['category'], recommender_engine.max_per_brand)
+
+    else:  # mode == "Analyze a Deal"
+        st.subheader(f"💰 Is This a Good Deal? {category_display}")
+
+        if observed_price is None:
+            st.warning("👆 Please enter a price above to analyze.")
+        else:
+            deal_verdict = get_pricing_verdict(observed_price=observed_price, predicted_price=predicted_price)
+
+            # Display key metrics side by side
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    label="Price You Found",
+                    value=f"₹ {observed_price:,.0f}"
+                )
+            with col2:
+                st.metric(
+                    label="Fair Price",
+                    value=f"₹ {predicted_price:,.0f}"
+                )
+            with col3:
+                difference = observed_price - predicted_price
+                if difference < 0:
+                    st.metric(
+                        label="Potential Savings",
+                        value=f"₹ {abs(difference):,.0f}",
+                        delta="Good deal! ✅"
+                    )
+                else:
+                    st.metric(
+                        label="Potential Overpayment",
+                        value=f"₹ {difference:,.0f}",
+                        delta="Overpriced ⚠️"
+                    )
+
+            st.write(f"*(Expected fair price range: ₹{lower_bound:,.0f} - ₹{upper_bound:,.0f})*")
+
+            # Display verdict with color coding
             if deal_verdict['verdict'] in ["Exceptional Value", "Good Deal"]:
-                st.success(f"🎉 **Verdict:** {deal_verdict['verdict']}! {deal_verdict['message']}")
+                st.success(f"🎉 **{deal_verdict['verdict']}** — {deal_verdict['message']}")
             elif deal_verdict['verdict'] == "Fairly Priced":
-                st.info(f"👍 **Verdict:** {deal_verdict['verdict']}. {deal_verdict['message']}")
-            else: # Overpriced or Slightly Overpriced
-                st.warning(f"⚠️ **Verdict:** {deal_verdict['verdict']}! {deal_verdict['message']}")
-
-            if deal_verdict['consumer_advantage'] > 0:
-                st.markdown(f"**Potential Savings:** ₹{deal_verdict['consumer_advantage']:,.0f} compared to the fair price.")
-            elif deal_verdict['consumer_disadvantage'] > 0:
-                st.markdown(f"**Potential Overpayment:** ₹{deal_verdict['consumer_disadvantage']:,.0f} compared to the fair price.")
-
-            st.markdown(f"**Brand Impact:** {brand_premium_text}")
-
-            st.subheader("📊 Key Price Drivers (SHAP Explanation)")
-            shap_df = pd.DataFrame(shap_explanation['top_features'], columns=['Feature', 'Contribution'])
-            st.dataframe(shap_df.style.format({"Contribution": "{:,.2f}"}), width='stretch')
-            st.caption("Positive contribution increases price, negative contribution decreases price.")
-
-            st.subheader("🌟 Consider These Alternatives")
-            # For "Analyze a Deal" mode, recommendations are still useful
-            recommendations = recommender_engine.get_recommendations(user_friendly_input, n=3)
-            
-            if recommendations:
-                recs_df = pd.DataFrame(recommendations)
-                
-                if user_friendly_input['category'] == "AC":
-                    display_cols = ['brand_name', 'capacity_ac_tons', 'star_rating', 'actual_price', 'fair_price', 'value_score']
-                    display_names = ['Brand', 'Capacity (Tons)', 'Stars', 'Market Price', 'Fair Price', 'Value Score']
-                elif user_friendly_input['category'] == "Refrigerator":
-                    display_cols = ['brand_name', 'capacity_ref_liters', 'star_rating', 'actual_price', 'fair_price', 'value_score', 'ref_frost_free', 'ref_double_door']
-                    display_names = ['Brand', 'Capacity (Litres)', 'Stars', 'Market Price', 'Fair Price', 'Value Score', 'Frost Free', 'Double Door']
-                else: # Washing Machine
-                    display_cols = ['brand_name', 'capacity_wm_kg', 'star_rating', 'actual_price', 'fair_price', 'value_score', 'wm_fully_automatic', 'wm_front_load']
-                    display_names = ['Brand', 'Capacity (Kg)', 'Stars', 'Market Price', 'Fair Price', 'Value Score', 'Fully Automatic', 'Front Load']
-                
-                recs_df_display = recs_df[display_cols].copy()
-                recs_df_display.columns = display_names
-                
-                for col in ['Market Price', 'Fair Price']:
-                    if col in recs_df_display.columns:
-                        recs_df_display[col] = recs_df_display[col].apply(lambda x: f"₹ {x:,.0f}")
-                
-                recs_df_display['Value Score'] = recs_df_display['Value Score'].apply(lambda x: f"{x:.2f}")
-
-                st.dataframe(recs_df_display, width='stretch')
-                st.caption("Higher 'Value Score' indicates a better deal (Fair Price > Market Price).")
+                st.info(f"👍 **{deal_verdict['verdict']}** — {deal_verdict['message']}")
             else:
-                st.info("No alternative recommendations found with similar specifications.")
+                st.warning(f"⚠️ **{deal_verdict['verdict']}** — {deal_verdict['message']}")
+
+            st.write(f"**Brand Impact:** {brand_premium_text}")
+
+            st.subheader("📊 What Affects the Price?")
+            shap_df = pd.DataFrame(shap_explanation['top_features'], columns=['Feature', 'Contribution (₹)'])
+            st.dataframe(shap_df.style.format({"Contribution (₹)": "₹{:,.0f}"}), use_container_width=True)
+            st.caption("Shows which features increase or decrease the price the most")
+
+            st.subheader("⭐ Better Alternatives (5 Smart Recommendations)")
+            st.write("Found a better option within your budget range:")
+            recommendations = recommender_engine.get_recommendations(user_friendly_input, n=5)
+            display_recommendations(recommendations, user_friendly_input['category'], recommender_engine.max_per_brand)
