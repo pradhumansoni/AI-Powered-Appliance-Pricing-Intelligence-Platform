@@ -338,7 +338,7 @@ pip install -r requirements.txt
 ## ▶️ Running the Application
 
 ```bash
-streamlit run app/streamlit_app.py
+streamlit run app.py
 ```
 
 ---
