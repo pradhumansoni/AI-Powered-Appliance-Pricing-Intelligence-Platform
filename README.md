@@ -1,4 +1,4 @@
-# 🏠 Home Appliance Pricing Intelligence Platform
+# 🏠 AI-Powered-Appliance-Pricing-Intelligence-Platform
 
 ### AI-Powered Fair Price Prediction, Overpricing Detection & Smart Product Recommendations
 
